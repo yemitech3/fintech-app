@@ -192,3 +192,4 @@ jobs:
           curl -X POST -H "Content-type: application/json" \
           --data "{\"text\":\"🔥 *Deployment FAILED* to '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
           "${{ secrets.SLACK_WEBHOOK_URL }}"
+
