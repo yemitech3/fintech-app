@@ -1,3 +1,7 @@
+permissions:
+  id-token: write
+  contents: read
+
 name: CI-CD Pipeline
 
 on:
@@ -13,6 +17,11 @@ on:
         description: 'Docker Image Tag (e.g., 1.0.0)'
         required: false
 
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
 env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: 418272782718
@@ -22,18 +31,19 @@ jobs:
   build-and-push:
     name: Build and Push Docker Image
     runs-on: self-hosted
+    timeout-minutes: 60
     outputs:
       image-tag: ${{ steps.set-tag.outputs.image-tag }}
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Source
         uses: actions/checkout@v3
 
-      - name: Set up Java
+      - name: Set up JDK
         uses: actions/setup-java@v3
         with:
-          java-version: 17
-          distribution: temurin
+          java-version: '17'
+          distribution: 'temurin'
 
       - name: Build with Maven
         run: |
@@ -52,55 +62,63 @@ jobs:
             -Dsonar.sources=.
             -Dsonar.java.binaries=target/classes
 
-      - name: Set Docker Image Tag
+      - name: Set Image Tag
         id: set-tag
         run: |
-          TAG="${{ github.event.inputs.image_tag }}"
+          TAG=${{ github.event.inputs.image_tag }}
           if [ -z "$TAG" ]; then
             TAG=$(date +%Y%m%d%H%M%S)
-            echo "Generated unique tag: $TAG"
+            echo "Generated unique image tag: $TAG"
           else
-            echo "Using provided tag: $TAG"
+            echo "Using provided image tag: $TAG"
           fi
           echo "image-tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Configure AWS
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to ECR
+      - name: Login to AWS ECR
         run: |
           aws ecr get-login-password --region $AWS_REGION | \
           docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
 
-      - name: Build & Push Docker Image
+      - name: Build and Push Docker Image
         run: |
           IMAGE_TAG=${{ steps.set-tag.outputs.image-tag }}
           IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
-          echo "Building Docker image $IMAGE_URI"
+          echo "🔨 Building Docker image: $IMAGE_URI"
           docker build -t $IMAGE_URI .
+          echo "📤 Pushing Docker image..."
           docker push $IMAGE_URI
 
-      - name: Cleanup Docker Images
+      - name: Clean Up Local Docker Images
         if: always()
         run: |
           IMAGE_TAG=${{ steps.set-tag.outputs.image-tag }}
           IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
+          echo "🧹 Cleaning up Docker image: $IMAGE_URI"
           docker rmi -f $IMAGE_URI || true
           docker image prune -af --filter "until=24h" || true
+          docker container prune -f || true
+          docker volume prune -f || true
 
-      - name: GitHub Summary
+      - name: Notify Slack (✅ Build Success)
         if: success()
         run: |
-          IMAGE_TAG=${{ steps.set-tag.outputs.image-tag }}
-          ENV=${{ github.event.inputs.environment }}
-          echo "## ✅ Build Successful
-**Actor:** $GITHUB_ACTOR
-**Environment:** $ENV
-**Image Tag:** $IMAGE_TAG" >> $GITHUB_STEP_SUMMARY
+          curl -X POST -H "Content-type: application/json" \
+          --data "{\"text\":\"✅ *Build Succeeded* by '${{ github.actor }}' in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
+          "${{ secrets.SLACK_WEBHOOK_URL }}"
+
+      - name: Notify Slack (❌ Build Failed)
+        if: failure()
+        run: |
+          curl -X POST -H "Content-type: application/json" \
+          --data "{\"text\":\"❌ *Build Failed* by '${{ github.actor }}' in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
+          "${{ secrets.SLACK_WEBHOOK_URL }}"
 
   deploy:
     name: Deploy to EKS
@@ -108,40 +126,69 @@ jobs:
     needs: build-and-push
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Repo
         uses: actions/checkout@v3
 
-      - name: Configure kubectl
+      - name: Notify Slack (🚀 Starting Deployment)
         run: |
-          ENV=${{ github.event.inputs.environment }}
-          CLUSTER_NAME="$ENV-dominion-cluster"
-          aws eks update-kubeconfig --region $AWS_REGION --name "$CLUSTER_NAME"
-          kubectl get nodes
+          curl -X POST -H "Content-type: application/json" \
+          --data "{\"text\":\"🚀 *Deployment started* in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
+          "${{ secrets.SLACK_WEBHOOK_URL }}"
 
-      - name: Deploy Application
+      - name: Configure kubectl via AWS CLI
         run: |
-          ENV=${{ github.event.inputs.environment }}
+          CLUSTER_NAME=${{ github.event.inputs.environment || 'prod' }}-dominion-cluster
+          aws eks update-kubeconfig --region $AWS_REGION --name "$CLUSTER_NAME"
+
+      - name: Verify EKS Access
+        run: |
+          kubectl get nodes || {
+            echo "❌ Unable to authenticate with EKS cluster."
+            exit 1
+          }
+
+      - name: Install EKS Add-ons
+        run: |
+          chmod +x eks_addons/script/helm_install.sh eks_addons/script/helm_charts.sh
+          ./eks_addons/script/helm_install.sh
+          ./eks_addons/script/helm_charts.sh
+
+      - name: Deploy Monitoring and Logging
+        run: |
+          kubectl apply -k ./eks_addons/monitoring
+          kubectl apply -k ./eks_addons/elk
+
+      - name: Deploy Application via Kustomize
+        run: |
+          ENV=${{ github.event.inputs.environment || 'prod' }}
           IMAGE_TAG=${{ needs.build-and-push.outputs.image-tag }}
           IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
           OVERLAY_DIR=./k8s/overlays/$ENV
 
+          echo "🔧 Deploying to: $ENV"
+          echo "📦 Using Docker image: $IMAGE_URI"
+
           if [ ! -d "$OVERLAY_DIR" ]; then
-            echo "Overlay directory $OVERLAY_DIR not found"
+            echo "❌ Overlay directory $OVERLAY_DIR not found!"
             exit 1
           fi
 
           cd "$OVERLAY_DIR"
           kustomize edit set image $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO=$IMAGE_URI
           cd -
+
           kubectl apply -k "$OVERLAY_DIR"
 
-      - name: GitHub Summary
+      - name: Notify Slack (✅ Deploy Success)
         if: success()
         run: |
-          ENV=${{ github.event.inputs.environment }}
-          IMAGE_TAG=${{ needs.build-and-push.outputs.image-tag }}
-          IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
-          echo "## ✅ Deployment Successful
-**Environment:** $ENV
-**Image:** $IMAGE_URI
-**Actor:** $GITHUB_ACTOR" >> $GITHUB_STEP_SUMMARY
+          curl -X POST -H "Content-type: application/json" \
+          --data "{\"text\":\"✅ *Deployment Successful* to '${{ github.event.inputs.environment || 'prod' }}' by '${{ github.actor }}'.\"}" \
+          "${{ secrets.SLACK_WEBHOOK_URL }}"
+
+      - name: Notify Slack (🔥 Deploy Failed)
+        if: failure()
+        run: |
+          curl -X POST -H "Content-type: application/json" \
+          --data "{\"text\":\"🔥 *Deployment FAILED* to '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
+          "${{ secrets.SLACK_WEBHOOK_URL }}"
