@@ -6,7 +6,7 @@ metadata:
     app: fintech-app
   namespace: fintech-dev
 spec:
-  replicas: 2
+  replicas: 4
   selector:
     matchLabels:
       app: fintech-app
@@ -17,4 +17,4 @@ spec:
     spec:
       containers:
       - name: fintech-app
-        image: 999568710647.dkr.ecr.us-east-2.amazonaws.com/fintech-app:IMAGE_TAG
+        image: 418272782718.dkr.ecr.us-east-2.amazonaws.com/fintech-app:IMAGE_TAG

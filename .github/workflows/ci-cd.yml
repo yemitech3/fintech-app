@@ -106,19 +106,19 @@ jobs:
           docker container prune -f || true
           docker volume prune -f || true
 
-      - name: Notify Slack (✅ Build Success)
-        if: success()
-        run: |
-          curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\":\"✅ *Build Succeeded* by '${{ github.actor }}' in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
-          "${{ secrets.SLACK_WEBHOOK_URL }}"
+      # - name: Notify Slack (✅ Build Success)
+      #   if: success()
+      #   run: |
+      #     curl -X POST -H "Content-type: application/json" \
+      #     --data "{\"text\":\"✅ *Build Succeeded* by '${{ github.actor }}' in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
+      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
 
-      - name: Notify Slack (❌ Build Failed)
-        if: failure()
-        run: |
-          curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\":\"❌ *Build Failed* by '${{ github.actor }}' in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
-          "${{ secrets.SLACK_WEBHOOK_URL }}"
+      # - name: Notify Slack (❌ Build Failed)
+      #   if: failure()
+      #   run: |
+      #     curl -X POST -H "Content-type: application/json" \
+      #     --data "{\"text\":\"❌ *Build Failed* by '${{ github.actor }}' in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
+      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
 
   deploy:
     name: Deploy to EKS
@@ -129,11 +129,11 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v3
 
-      - name: Notify Slack (🚀 Starting Deployment)
-        run: |
-          curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\":\"🚀 *Deployment started* in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
-          "${{ secrets.SLACK_WEBHOOK_URL }}"
+      # - name: Notify Slack (🚀 Starting Deployment)
+      #   run: |
+      #     curl -X POST -H "Content-type: application/json" \
+      #     --data "{\"text\":\"🚀 *Deployment started* in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
+      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
 
       - name: Configure kubectl via AWS CLI
         run: |
@@ -179,17 +179,16 @@ jobs:
 
           kubectl apply -k "$OVERLAY_DIR"
 
-      - name: Notify Slack (✅ Deploy Success)
-        if: success()
-        run: |
-          curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\":\"✅ *Deployment Successful* to '${{ github.event.inputs.environment || 'prod' }}' by '${{ github.actor }}'.\"}" \
-          "${{ secrets.SLACK_WEBHOOK_URL }}"
+      # - name: Notify Slack (✅ Deploy Success)
+      #   if: success()
+      #   run: |
+      #     curl -X POST -H "Content-type: application/json" \
+      #     --data "{\"text\":\"✅ *Deployment Successful* to '${{ github.event.inputs.environment || 'prod' }}' by '${{ github.actor }}'.\"}" \
+      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
 
-      - name: Notify Slack (🔥 Deploy Failed)
-        if: failure()
-        run: |
-          curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\":\"🔥 *Deployment FAILED* to '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
-          "${{ secrets.SLACK_WEBHOOK_URL }}"
-
+      # - name: Notify Slack (🔥 Deploy Failed)
+      #   if: failure()
+      #   run: |
+      #     curl -X POST -H "Content-type: application/json" \
+      #     --data "{\"text\":\"🔥 *Deployment FAILED* to '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
+      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
