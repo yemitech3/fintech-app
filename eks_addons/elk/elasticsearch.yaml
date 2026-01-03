@@ -304,7 +304,7 @@ metadata:
   namespace: kube-system
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:418272782718:certificate/c35ed1c3-9730-40d3-bcf4-fd2daebc9d74
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:043310666010:certificate/1ff09f11-6a55-4ad6-a161-6fc82fd75b2f
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80,"HTTPS":443}]'
     alb.ingress.kubernetes.io/actions.ssl-redirect: >
       {"Type": "redirect", "RedirectConfig": {"Protocol": "HTTPS", "Port": "443", "StatusCode": "HTTP_301"}}
@@ -317,7 +317,7 @@ metadata:
 spec:
   ingressClassName: alb
   rules:
-  - host: kibana.shemphadglobalconcept.com
+  - host: kibana.greathonour.click
     http:
       paths:
       - path: /

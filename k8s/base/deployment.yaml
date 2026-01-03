@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: fintech-app
-        image: 418272782718.dkr.ecr.us-east-2.amazonaws.com/fintech-app:latest
+        image: 043310666010.dkr.ecr.us-east-2.amazonaws.com/fintech-app:latest
         ports:
         - containerPort: 8080
         env:
