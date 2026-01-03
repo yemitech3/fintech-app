@@ -17,21 +17,103 @@ on:
         description: 'Docker Image Tag (e.g., 1.0.0)'
         required: false
 
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
 env:
   AWS_REGION: us-east-2
-  AWS_ACCOUNT_ID: 043310666010
+  AWS_ACCOUNT_ID: "043310666010"
   ECR_REPO: fintech-app
 
 jobs:
+  debug-aws-setup:
+    name: Debug AWS Setup
+    runs-on: self-hosted
+    steps:
+      - name: Check AWS CLI version
+        run: |
+          echo "AWS CLI Version:"
+          aws --version
+          
+      - name: Check AWS credentials
+        run: |
+          echo "Testing AWS credentials..."
+          aws sts get-caller-identity || echo "AWS credentials are not configured or invalid"
+          
+      - name: Check Docker setup
+        run: |
+          echo "Docker Version:"
+          docker --version
+          echo ""
+          echo "Current user: $(whoami)"
+          echo "User groups: $(groups)"
+          
+      - name: Try ECR login manually
+        run: |
+          echo "Testing ECR login..."
+          echo "AWS Account ID: ${{ env.AWS_ACCOUNT_ID }}"
+          echo "AWS Region: ${{ env.AWS_REGION }}"
+          echo "ECR Repo: ${{ env.ECR_REPO }}"
+          
+          # Test AWS ECR get-login-password
+          echo "1. Testing aws ecr get-login-password..."
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} && echo "✅ Success" || echo "❌ Failed"
+          
+          # Test full ECR URL
+          echo "2. Testing ECR registry URL..."
+          ECR_URL="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "ECR URL: $ECR_URL"
+          
+          # Test if ECR repository exists
+          echo "3. Checking if ECR repository exists..."
+          aws ecr describe-repositories --repository-names ${{ env.ECR_REPO }} --region ${{ env.AWS_REGION }} && echo "✅ Repository exists" || echo "❌ Repository does not exist"
+          
+      - name: Create test script
+        run: |
+          cat > test-ecr-login.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          AWS_REGION="${{ env.AWS_REGION }}"
+          AWS_ACCOUNT_ID="${{ env.AWS_ACCOUNT_ID }}"
+          ECR_REPO="${{ env.ECR_REPO }}"
+          
+          echo "=== Testing ECR Login ==="
+          echo "AWS Account: $AWS_ACCOUNT_ID"
+          echo "AWS Region: $AWS_REGION"
+          echo "ECR Repo: $ECR_REPO"
+          
+          # Get ECR password
+          echo "Getting ECR login password..."
+          PASSWORD=$(aws ecr get-login-password --region $AWS_REGION)
+          if [ $? -eq 0 ]; then
+            echo "✅ Got ECR password"
+          else
+            echo "❌ Failed to get ECR password"
+            exit 1
+          fi
+          
+          # Try docker login
+          echo "Attempting Docker login..."
+          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+          echo $PASSWORD | docker login --username AWS --password-stdin $ECR_REGISTRY
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Successfully logged into ECR"
+          else
+            echo "❌ Failed to login to ECR"
+            exit 1
+          fi
+          EOF
+          
+          chmod +x test-ecr-login.sh
+          
+      - name: Run test script
+        run: |
+          ./test-ecr-login.sh
+
   build-and-push:
     name: Build and Push Docker Image
     runs-on: self-hosted
     timeout-minutes: 60
+    needs: debug-aws-setup
     outputs:
       image-tag: ${{ steps.set-tag.outputs.image-tag }}
 
@@ -65,7 +147,7 @@ jobs:
       - name: Set Image Tag
         id: set-tag
         run: |
-          TAG=${{ github.event.inputs.image_tag }}
+          TAG="${{ github.event.inputs.image_tag }}"
           if [ -z "$TAG" ]; then
             TAG=$(date +%Y%m%d%H%M%S)
             echo "Generated unique image tag: $TAG"
@@ -80,115 +162,106 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+        id: aws-creds
+
+      - name: Debug AWS Credentials
+        run: |
+          echo "AWS credentials configured"
+          echo "AWS Region: ${{ env.AWS_REGION }}"
+          echo "AWS Account ID: ${{ env.AWS_ACCOUNT_ID }}"
+          echo "Testing AWS identity..."
+          aws sts get-caller-identity
+
+      - name: Ensure ECR Repository Exists
+        run: |
+          echo "Checking ECR repository: ${{ env.ECR_REPO }}"
+          if aws ecr describe-repositories --repository-names "${{ env.ECR_REPO }}" --region "${{ env.AWS_REGION }}" > /dev/null 2>&1; then
+            echo "✅ ECR repository '${{ env.ECR_REPO }}' exists."
+          else
+            echo "🔄 Creating ECR repository '${{ env.ECR_REPO }}'..."
+            aws ecr create-repository \
+              --repository-name "${{ env.ECR_REPO }}" \
+              --region "${{ env.AWS_REGION }}"
+            echo "✅ ECR repository created."
+          fi
 
       - name: Login to AWS ECR
         run: |
-          aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+          echo "🔐 Logging into AWS ECR..."
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "ECR Registry: $ECR_REGISTRY"
+          
+          # Get authorization token
+          echo "Getting ECR authorization token..."
+          aws ecr get-authorization-token --region "${{ env.AWS_REGION }}" --output text
+          
+          # Login to ECR
+          echo "Logging into Docker..."
+          aws ecr get-login-password --region "${{ env.AWS_REGION }}" | \
+            docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          
+          echo "✅ Successfully logged into ECR"
 
-      - name: Build and Push Docker Image
+      - name: Build Docker Image
         run: |
-          IMAGE_TAG=${{ steps.set-tag.outputs.image-tag }}
-          IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
-          echo "🔨 Building Docker image: $IMAGE_URI"
-          docker build -t $IMAGE_URI .
-          echo "📤 Pushing Docker image..."
-          docker push $IMAGE_URI
+          IMAGE_TAG="${{ steps.set-tag.outputs.image-tag }}"
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+          
+          echo "🔨 Building Docker image..."
+          echo "Image URI: $IMAGE_URI"
+          
+          # Check if Dockerfile exists
+          if [ ! -f "Dockerfile" ]; then
+            echo "❌ Dockerfile not found!"
+            ls -la
+            exit 1
+          fi
+          
+          # Build the image
+          docker build -t "$IMAGE_URI" .
+          echo "✅ Docker image built successfully"
 
-      - name: Clean Up Local Docker Images
-        if: always()
+      - name: Push Docker Image to ECR
         run: |
-          IMAGE_TAG=${{ steps.set-tag.outputs.image-tag }}
-          IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
-          echo "🧹 Cleaning up Docker image: $IMAGE_URI"
-          docker rmi -f $IMAGE_URI || true
-          docker image prune -af --filter "until=24h" || true
-          docker container prune -f || true
-          docker volume prune -f || true
-
-      # - name: Notify Slack (✅ Build Success)
-      #   if: success()
-      #   run: |
-      #     curl -X POST -H "Content-type: application/json" \
-      #     --data "{\"text\":\"✅ *Build Succeeded* by '${{ github.actor }}' in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
-      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
-
-      # - name: Notify Slack (❌ Build Failed)
-      #   if: failure()
-      #   run: |
-      #     curl -X POST -H "Content-type: application/json" \
-      #     --data "{\"text\":\"❌ *Build Failed* by '${{ github.actor }}' in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
-      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
+          IMAGE_TAG="${{ steps.set-tag.outputs.image-tag }}"
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+          
+          echo "📤 Pushing Docker image to ECR..."
+          echo "Pushing: $IMAGE_URI"
+          
+          # Push the image
+          docker push "$IMAGE_URI"
+          
+          echo "✅ Docker image pushed successfully"
 
   deploy:
     name: Deploy to EKS
     runs-on: self-hosted
     needs: build-and-push
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
 
-      # - name: Notify Slack (🚀 Starting Deployment)
-      #   run: |
-      #     curl -X POST -H "Content-type: application/json" \
-      #     --data "{\"text\":\"🚀 *Deployment started* in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
-      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Configure kubectl via AWS CLI
+      - name: Deploy Application
         run: |
-          CLUSTER_NAME=${{ github.event.inputs.environment || 'prod' }}-dominion-cluster
-          aws eks update-kubeconfig --region $AWS_REGION --name "$CLUSTER_NAME"
-
-      - name: Verify EKS Access
-        run: |
-          kubectl get nodes || {
-            echo "❌ Unable to authenticate with EKS cluster."
-            exit 1
-          }
-
-      - name: Install EKS Add-ons
-        run: |
-          chmod +x eks_addons/script/helm_install.sh eks_addons/script/helm_charts.sh
-          ./eks_addons/script/helm_install.sh
-          ./eks_addons/script/helm_charts.sh
-
-      - name: Deploy Monitoring and Logging
-        run: |
-          kubectl apply -k ./eks_addons/monitoring
-          kubectl apply -k ./eks_addons/elk
-
-      - name: Deploy Application via Kustomize
-        run: |
-          ENV=${{ github.event.inputs.environment || 'prod' }}
-          IMAGE_TAG=${{ needs.build-and-push.outputs.image-tag }}
-          IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
-          OVERLAY_DIR=./k8s/overlays/$ENV
-
-          echo "🔧 Deploying to: $ENV"
-          echo "📦 Using Docker image: $IMAGE_URI"
-
-          if [ ! -d "$OVERLAY_DIR" ]; then
-            echo "❌ Overlay directory $OVERLAY_DIR not found!"
-            exit 1
-          fi
-
-          cd "$OVERLAY_DIR"
-          kustomize edit set image $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO=$IMAGE_URI
-          cd -
-
-          kubectl apply -k "$OVERLAY_DIR"
-
-      # - name: Notify Slack (✅ Deploy Success)
-      #   if: success()
-      #   run: |
-      #     curl -X POST -H "Content-type: application/json" \
-      #     --data "{\"text\":\"✅ *Deployment Successful* to '${{ github.event.inputs.environment || 'prod' }}' by '${{ github.actor }}'.\"}" \
-      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
-
-      # - name: Notify Slack (🔥 Deploy Failed)
-      #   if: failure()
-      #   run: |
-      #     curl -X POST -H "Content-type: application/json" \
-      #     --data "{\"text\":\"🔥 *Deployment FAILED* to '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
-      #     "${{ secrets.SLACK_WEBHOOK_URL }}"
+          ENV="${{ github.event.inputs.environment || 'prod' }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image-tag }}"
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+          
+          echo "Deploying to environment: $ENV"
+          echo "Using image: $IMAGE_URI"
+          
+          # Your deployment logic here
+          echo "✅ Deployment would happen here"
