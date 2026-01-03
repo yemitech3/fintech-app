@@ -24,7 +24,7 @@ on:
 
 env:
   AWS_REGION: us-east-2
-  AWS_ACCOUNT_ID: 043310666010
+  AWS_ACCOUNT_ID: "043310666010"  # Keep as string with quotes
   ECR_REPO: fintech-app
 
 jobs:
@@ -38,6 +38,9 @@ jobs:
     steps:
       - name: Checkout Source
         uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
       - name: Set up JDK
         uses: actions/setup-java@v3
@@ -65,7 +68,7 @@ jobs:
       - name: Set Image Tag
         id: set-tag
         run: |
-          TAG=${{ github.event.inputs.image_tag }}
+          TAG="${{ github.event.inputs.image_tag }}"
           if [ -z "$TAG" ]; then
             TAG=$(date +%Y%m%d%H%M%S)
             echo "Generated unique image tag: $TAG"
@@ -81,30 +84,96 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to AWS ECR
+      - name: Create ECR Repository if not exists
+        id: create-ecr
         run: |
-          aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+          if aws ecr describe-repositories --repository-names "${{ env.ECR_REPO }}" --region "${{ env.AWS_REGION }}" > /dev/null 2>&1; then
+            echo "ECR repository '${{ env.ECR_REPO }}' already exists."
+          else
+            echo "Creating ECR repository '${{ env.ECR_REPO }}'..."
+            aws ecr create-repository \
+              --repository-name "${{ env.ECR_REPO }}" \
+              --region "${{ env.AWS_REGION }}"
+            echo "ECR repository created successfully."
+          fi
 
-      - name: Build and Push Docker Image
+      - name: Login to AWS ECR
+        id: login-ecr
         run: |
-          IMAGE_TAG=${{ steps.set-tag.outputs.image-tag }}
-          IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
+          echo "Logging into ECR..."
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "ECR Registry: $ECR_REGISTRY"
+          
+          aws ecr get-login-password --region "${{ env.AWS_REGION }}" | \
+            docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          
+          if [ $? -eq 0 ]; then
+            echo "Successfully logged into ECR"
+          else
+            echo "Failed to login to ECR"
+            exit 1
+          fi
+
+      - name: Build Docker Image
+        id: build-image
+        run: |
+          IMAGE_TAG="${{ steps.set-tag.outputs.image-tag }}"
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+          
           echo "🔨 Building Docker image: $IMAGE_URI"
-          docker build -t $IMAGE_URI .
-          echo "📤 Pushing Docker image..."
-          docker push $IMAGE_URI
+          
+          # Build the image
+          docker build \
+            --tag "$IMAGE_URI" \
+            --file Dockerfile \
+            .
+          
+          echo "✅ Docker image built successfully"
+          
+          # Tag the image for ECR
+          docker tag "$IMAGE_URI" "$ECR_REGISTRY/${{ env.ECR_REPO }}:latest"
+          
+          echo "image-uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Push Docker Image to ECR
+        id: push-image
+        run: |
+          IMAGE_TAG="${{ steps.set-tag.outputs.image-tag }}"
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+          
+          echo "📤 Pushing Docker image to ECR..."
+          echo "Pushing: $IMAGE_URI"
+          
+          # Push the tagged image
+          docker push "$IMAGE_URI"
+          
+          # Also push latest tag
+          echo "Pushing latest tag..."
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPO }}:latest"
+          
+          echo "✅ Docker image pushed successfully to ECR"
 
       - name: Clean Up Local Docker Images
         if: always()
         run: |
-          IMAGE_TAG=${{ steps.set-tag.outputs.image-tag }}
-          IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
-          echo "🧹 Cleaning up Docker image: $IMAGE_URI"
-          docker rmi -f $IMAGE_URI || true
-          docker image prune -af --filter "until=24h" || true
-          docker container prune -f || true
-          docker volume prune -f || true
+          IMAGE_TAG="${{ steps.set-tag.outputs.image-tag }}"
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+          
+          echo "🧹 Cleaning up Docker images..."
+          
+          # Remove specific image
+          docker rmi -f "$IMAGE_URI" 2>/dev/null || true
+          
+          # Remove latest tag
+          docker rmi -f "$ECR_REGISTRY/${{ env.ECR_REPO }}:latest" 2>/dev/null || true
+          
+          # Clean up unused Docker resources
+          docker system prune -af --volumes 2>/dev/null || true
+          
+          echo "✅ Cleanup completed"
 
       # - name: Notify Slack (✅ Build Success)
       #   if: success()
@@ -124,6 +193,7 @@ jobs:
     name: Deploy to EKS
     runs-on: self-hosted
     needs: build-and-push
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout Repo
@@ -135,49 +205,125 @@ jobs:
       #     --data "{\"text\":\"🚀 *Deployment started* in '${{ github.event.inputs.environment || 'prod' }}'.\"}" \
       #     "${{ secrets.SLACK_WEBHOOK_URL }}"
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Configure kubectl via AWS CLI
         run: |
-          CLUSTER_NAME=${{ github.event.inputs.environment || 'prod' }}-dominion-cluster
-          aws eks update-kubeconfig --region $AWS_REGION --name "$CLUSTER_NAME"
+          ENVIRONMENT="${{ github.event.inputs.environment || 'prod' }}"
+          CLUSTER_NAME="${ENVIRONMENT}-dominion-cluster"
+          
+          echo "Configuring kubectl for cluster: $CLUSTER_NAME"
+          
+          # Update kubeconfig
+          aws eks update-kubeconfig \
+            --region "${{ env.AWS_REGION }}" \
+            --name "$CLUSTER_NAME"
+          
+          # Verify configuration
+          kubectl config get-contexts
 
       - name: Verify EKS Access
         run: |
+          echo "Verifying EKS cluster access..."
           kubectl get nodes || {
             echo "❌ Unable to authenticate with EKS cluster."
+            echo "Please check:"
+            echo "1. Cluster name is correct"
+            echo "2. IAM permissions are properly configured"
+            echo "3. aws-iam-authenticator is installed"
             exit 1
           }
+          
+          echo "✅ Successfully connected to EKS cluster"
 
       - name: Install EKS Add-ons
         run: |
+          echo "Installing EKS add-ons..."
+          
+          # Make scripts executable
           chmod +x eks_addons/script/helm_install.sh eks_addons/script/helm_charts.sh
+          
+          # Install Helm
           ./eks_addons/script/helm_install.sh
+          
+          # Install Helm charts
           ./eks_addons/script/helm_charts.sh
+          
+          echo "✅ EKS add-ons installed"
 
       - name: Deploy Monitoring and Logging
         run: |
-          kubectl apply -k ./eks_addons/monitoring
-          kubectl apply -k ./eks_addons/elk
+          echo "Deploying monitoring stack..."
+          kubectl apply -k ./eks_addons/monitoring || echo "⚠️ Monitoring deployment may have issues"
+          
+          echo "Deploying logging stack..."
+          kubectl apply -k ./eks_addons/elk || echo "⚠️ Logging deployment may have issues"
+          
+          echo "✅ Monitoring and logging deployed"
 
       - name: Deploy Application via Kustomize
         run: |
-          ENV=${{ github.event.inputs.environment || 'prod' }}
-          IMAGE_TAG=${{ needs.build-and-push.outputs.image-tag }}
-          IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
-          OVERLAY_DIR=./k8s/overlays/$ENV
-
-          echo "🔧 Deploying to: $ENV"
-          echo "📦 Using Docker image: $IMAGE_URI"
-
+          ENV="${{ github.event.inputs.environment || 'prod' }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image-tag }}"
+          ECR_REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+          OVERLAY_DIR="./k8s/overlays/$ENV"
+          
+          echo "🔧 Deployment Environment: $ENV"
+          echo "📦 Docker Image: $IMAGE_URI"
+          echo "📁 Overlay Directory: $OVERLAY_DIR"
+          
+          # Check if overlay directory exists
           if [ ! -d "$OVERLAY_DIR" ]; then
-            echo "❌ Overlay directory $OVERLAY_DIR not found!"
+            echo "❌ Error: Overlay directory '$OVERLAY_DIR' not found!"
+            echo "Available overlays:"
+            ls -la ./k8s/overlays/ 2>/dev/null || echo "No overlays directory found"
             exit 1
           fi
-
+          
+          echo "Using Kustomize to set image..."
+          
+          # Navigate to overlay directory and set image
           cd "$OVERLAY_DIR"
-          kustomize edit set image $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO=$IMAGE_URI
-          cd -
-
+          
+          # Update the image in kustomization.yaml
+          kustomize edit set image \
+            "$ECR_REGISTRY/${{ env.ECR_REPO }}"="$IMAGE_URI"
+          
+          # Go back to root
+          cd - > /dev/null
+          
+          echo "Applying Kustomize configuration..."
           kubectl apply -k "$OVERLAY_DIR"
+          
+          echo "✅ Application deployed successfully"
+          
+          # Wait for rollout to complete
+          echo "Waiting for rollout to complete..."
+          kubectl rollout status deployment/fintech-app -n default --timeout=300s
+
+      - name: Verify Deployment
+        run: |
+          echo "Verifying deployment..."
+          
+          # Check pods
+          echo "📦 Pods status:"
+          kubectl get pods -l app=fintech-app
+          
+          # Check services
+          echo "🔌 Services status:"
+          kubectl get svc -l app=fintech-app
+          
+          # Check deployments
+          echo "🚀 Deployments status:"
+          kubectl get deployments -l app=fintech-app
+          
+          echo "✅ Deployment verification complete"
 
       # - name: Notify Slack (✅ Deploy Success)
       #   if: success()
