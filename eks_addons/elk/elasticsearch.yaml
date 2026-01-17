@@ -304,7 +304,7 @@ metadata:
   namespace: kube-system
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:043310666010:certificate/c6ae14d7-ddb7-4031-99d8-7d5728909daa
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:043310666010:certificate/22ab5c20-83c0-415e-8fcd-d5b7e19590da
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80,"HTTPS":443}]'
     alb.ingress.kubernetes.io/actions.ssl-redirect: >
       {"Type": "redirect", "RedirectConfig": {"Protocol": "HTTPS", "Port": "443", "StatusCode": "HTTP_301"}}
